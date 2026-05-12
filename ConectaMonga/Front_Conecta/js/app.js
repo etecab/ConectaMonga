@@ -3,6 +3,9 @@
 //  Lógica principal do frontend
 // =============================================
 
+// ── URL DO BACKEND ──
+const API = "https://fearless-fulfillment-production-7d7e.up.railway.app";
+
 // ── DADOS DE EXEMPLO ──
 const sampleEvents = [
   {
@@ -314,30 +317,65 @@ function renderLikedEvents() {
 //  AUTENTICAÇÃO
 // =============================================
 
-function doLogin() {
+async function doLogin() {
   const email = document.getElementById('loginEmail').value;
   const pass  = document.getElementById('loginPass').value;
   if (!email || !pass) { showToast('Preencha email e senha!'); return; }
 
-  currentUser = { name: email.split('@')[0], email, type: 'user' };
-  updateNavForUser();
-  closeModal('loginModal');
-  showToast(`Bem-vindo(a), ${currentUser.name}!`);
+  try {
+    // Tenta login como usuário comum
+    let res = await fetch(`${API}/api/usuarios/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, senha: pass })
+    });
+
+    // Se não encontrou, tenta como empresa
+    if (res.status === 401) {
+      res = await fetch(`${API}/api/empresas/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, senha: pass })
+      });
+    }
+
+    const data = await res.json();
+    if (!res.ok) { showToast(data.erro || 'Erro ao fazer login'); return; }
+
+    currentUser = data.usuario;
+    updateNavForUser();
+    closeModal('loginModal');
+    showToast(`Bem-vindo(a), ${currentUser.name}!`);
+  } catch (e) {
+    showToast('Erro de conexão com o servidor!');
+  }
 }
 
-function doRegister() {
+async function doRegister() {
   const name  = document.getElementById('regName').value;
   const email = document.getElementById('regEmail').value;
   const pass  = document.getElementById('regPass').value;
   if (!name || !email || !pass) { showToast('Preencha todos os campos!'); return; }
 
-  currentUser = { name, email, type: 'user' };
-  updateNavForUser();
-  closeModal('loginModal');
-  showToast(`Conta criada! Bem-vindo(a), ${name}!`);
+  try {
+    const res = await fetch(`${API}/api/usuarios/cadastro`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nome: name, email, senha: pass })
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast(data.erro || 'Erro ao cadastrar'); return; }
+
+    currentUser = { name, email, type: 'user', init: name[0].toUpperCase() };
+    updateNavForUser();
+    closeModal('loginModal');
+    showToast(`Conta criada! Bem-vindo(a), ${name}!`);
+  } catch (e) {
+    showToast('Erro de conexão com o servidor!');
+  }
 }
 
-function doEmpresaRegister() {
+async function doEmpresaRegister() {
   const name  = document.getElementById('empName').value;
   const cnpj  = document.getElementById('empCnpj').value;
   const email = document.getElementById('empEmail').value;
@@ -350,18 +388,35 @@ function doEmpresaRegister() {
     showToast('CNPJ inválido!'); return;
   }
 
-  currentUser = {
-    name, email, type: 'empresa',
-    segment: document.getElementById('empSegmento').value
-  };
+  try {
+    const res = await fetch(`${API}/api/empresas/cadastro`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        nome: name, cnpj, email, senha: pass,
+        cidadeId: 1, segmentoId: 1,
+        telefone: document.getElementById('empTelefone')?.value || ''
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast(data.erro || 'Erro ao cadastrar empresa'); return; }
 
-  document.getElementById('dash-company-name').textContent = name;
-  document.getElementById('dash-company-seg').textContent  = currentUser.segment;
+    currentUser = {
+      id: data.id, name, email, type: 'empresa',
+      segment: document.getElementById('empSegmento')?.value || 'Entretenimento',
+      init: name[0].toUpperCase()
+    };
 
-  updateNavForUser();
-  closeModal('loginModal');
-  showPage('dashboard');
-  showToast(`Empresa ${name} cadastrada com sucesso!`);
+    document.getElementById('dash-company-name').textContent = name;
+    document.getElementById('dash-company-seg').textContent  = currentUser.segment;
+
+    updateNavForUser();
+    closeModal('loginModal');
+    showPage('dashboard');
+    showToast(`Empresa ${name} cadastrada com sucesso!`);
+  } catch (e) {
+    showToast('Erro de conexão com o servidor!');
+  }
 }
 
 function socialLogin(provider) {
@@ -650,6 +705,35 @@ function formatCNPJ(input) {
 //  INICIALIZAÇÃO
 // =============================================
 
+async function carregarEventos() {
+  try {
+    const res = await fetch(`${API}/api/eventos`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.length > 0) {
+        events = data.map(e => ({
+          id: e.id,
+          title: e.title || e.titulo,
+          category: e.category || e.categoria,
+          date: e.date || e.data_evento,
+          time: e.time || e.horario || '20:00',
+          local: e.local,
+          wpp: e.wpp || e.contato_whatsapp || '',
+          desc: e.desc || e.descricao || '',
+          company: e.company || e.empresa,
+          companyInit: e.companyInit || (e.company || e.empresa || 'E')[0].toUpperCase(),
+          segment: e.segment || e.segmento || '',
+          likes: e.likes || 0,
+          img: e.img || e.foto_url || null
+        }));
+      }
+    }
+  } catch (e) {
+    console.warn('Backend offline, usando dados de exemplo.');
+  }
+  renderEvents(events);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   // Fechar modais ao clicar fora
   document.querySelectorAll('.modal-overlay').forEach(overlay => {
@@ -666,6 +750,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Render inicial
-  renderEvents(events);
+  // Carrega eventos do backend (ou dados de exemplo se offline)
+  carregarEventos();
 });
