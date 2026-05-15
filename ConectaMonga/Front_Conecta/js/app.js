@@ -6,6 +6,17 @@
 // ── URL DO BACKEND ──
 const API = "https://fearless-fulfillment-production-7d7e.up.railway.app";
 
+// ── JWT — GERENCIAMENTO DE TOKEN ──
+const Token = {
+  salvar:  (t) => sessionStorage.setItem("cm_token", t),
+  obter:   ()  => sessionStorage.getItem("cm_token"),
+  remover: ()  => sessionStorage.removeItem("cm_token"),
+  headers: ()  => ({
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${Token.obter() || ""}`
+  })
+};
+
 // ── DADOS DE EXEMPLO ──
 const sampleEvents = [
   {
@@ -323,14 +334,12 @@ async function doLogin() {
   if (!email || !pass) { showToast('Preencha email e senha!'); return; }
 
   try {
-    // Tenta login como usuário comum
     let res = await fetch(`${API}/api/usuarios/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, senha: pass })
     });
 
-    // Se não encontrou, tenta como empresa
     if (res.status === 401) {
       res = await fetch(`${API}/api/empresas/login`, {
         method: 'POST',
@@ -341,6 +350,9 @@ async function doLogin() {
 
     const data = await res.json();
     if (!res.ok) { showToast(data.erro || 'Erro ao fazer login'); return; }
+
+    // Salva o token JWT
+    if (data.token) Token.salvar(data.token);
 
     currentUser = data.usuario;
     updateNavForUser();
@@ -366,7 +378,10 @@ async function doRegister() {
     const data = await res.json();
     if (!res.ok) { showToast(data.erro || 'Erro ao cadastrar'); return; }
 
-    currentUser = { name, email, type: 'user', init: name[0].toUpperCase() };
+    // Salva o token JWT
+    if (data.token) Token.salvar(data.token);
+
+    currentUser = { id: data.id, name, email, type: 'user', init: name[0].toUpperCase() };
     updateNavForUser();
     closeModal('loginModal');
     showToast(`Conta criada! Bem-vindo(a), ${name}!`);
@@ -400,6 +415,9 @@ async function doEmpresaRegister() {
     });
     const data = await res.json();
     if (!res.ok) { showToast(data.erro || 'Erro ao cadastrar empresa'); return; }
+
+    // Salva o token JWT
+    if (data.token) Token.salvar(data.token);
 
     currentUser = {
       id: data.id, name, email, type: 'empresa',

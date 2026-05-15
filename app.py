@@ -1,7 +1,6 @@
 # =============================================
 #  ConectaMonga — app.py
-#  Backend Flask + MySQL
-#  Porta: 5000 (local) ou automática (Railway)
+#  Backend Flask + MySQL + JWT
 # =============================================
 
 from flask import Flask, request, jsonify
@@ -10,18 +9,25 @@ import pymysql
 import hashlib
 import os
 import re
+import jwt
+import datetime
+from functools import wraps
 
 app = Flask(__name__)
-CORS(app)  # Permite chamadas do frontend
+CORS(app)
+
+# ── CHAVE JWT ──
+JWT_SECRET = os.environ.get("JWT_SECRET", "conectamonga_secret_2026")
 
 # ── CONEXÃO COM O BANCO ──
 def get_db():
     return pymysql.connect(
-        host     = os.environ.get("DB_HOST",     "localhost"),
-        user     = os.environ.get("DB_USER",     "root"),
-        password = os.environ.get("DB_PASSWORD", ""),  # ← sua senha aqui se rodar local
-        database = os.environ.get("DB_NAME",     "conectamonga"),
-        charset  = "utf8mb4",
+        host        = os.environ.get("DB_HOST",     "localhost"),
+        port        = int(os.environ.get("DB_PORT", 3306)),
+        user        = os.environ.get("DB_USER",     "root"),
+        password    = os.environ.get("DB_PASSWORD", ""),
+        database    = os.environ.get("DB_NAME",     "railway"),
+        charset     = "utf8mb4",
         cursorclass = pymysql.cursors.DictCursor
     )
 
@@ -29,8 +35,53 @@ def hash_senha(senha):
     return hashlib.sha256(senha.encode()).hexdigest()
 
 def validar_cnpj(cnpj):
-    digits = re.sub(r"\D", "", cnpj)
-    return len(digits) == 14
+    return len(re.sub(r"\D", "", cnpj)) == 14
+
+# =============================================
+#  JWT — FUNÇÕES
+# =============================================
+
+def gerar_token(usuario_id, tipo):
+    """Gera um token JWT válido por 24 horas."""
+    payload = {
+        "id":   usuario_id,
+        "tipo": tipo,
+        "exp":  datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+def verificar_token(token):
+    """Verifica e decodifica o token. Retorna None se inválido."""
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+def token_obrigatorio(f):
+    """Decorator — protege rotas que exigem login."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.headers.get("Authorization", "")
+        token = auth.replace("Bearer ", "").strip()
+        if not token:
+            return jsonify({"erro": "Token não fornecido. Faça login primeiro."}), 401
+        payload = verificar_token(token)
+        if not payload:
+            return jsonify({"erro": "Token inválido ou expirado. Faça login novamente."}), 401
+        request.usuario_atual = payload
+        return f(*args, **kwargs)
+    return decorated
+
+# Rota para verificar se o token ainda é válido
+@app.route("/api/auth/verificar", methods=["GET"])
+@token_obrigatorio
+def verificar_sessao():
+    return jsonify({
+        "valido": True,
+        "usuario": request.usuario_atual
+    }), 200
 
 # =============================================
 #  EVENTOS
@@ -44,7 +95,7 @@ def listar_eventos():
     try:
         with db.cursor() as cur:
             sql = """
-                SELECT ev.id, ev.titulo AS title, ev.descricao AS desc,
+                SELECT ev.id, ev.titulo AS title, ev.descricao AS `desc`,
                        ev.data_evento AS date, ev.horario AS time,
                        ev.local, ev.contato_whatsapp AS wpp,
                        ev.publicado_em, ev.foto_url AS img,
@@ -67,16 +118,10 @@ def listar_eventos():
             sql += " ORDER BY ev.data_evento ASC"
             cur.execute(sql, params)
             eventos = cur.fetchall()
-
-            # Formata data e hora
             for e in eventos:
-                if e["date"]:
-                    e["date"] = str(e["date"])
-                if e["time"]:
-                    e["time"] = str(e["time"])
-                # Iniciais da empresa
-                e["companyInit"] = e["company"][0].upper() if e["company"] else "E"
-
+                if e["date"]: e["date"] = str(e["date"])
+                if e["time"]: e["time"] = str(e["time"])
+                e["companyInit"] = (e["company"] or "E")[0].upper()
         return jsonify(eventos), 200
     finally:
         db.close()
@@ -98,19 +143,20 @@ def obter_evento(id):
             evento = cur.fetchone()
             if not evento:
                 return jsonify({"erro": "Evento não encontrado"}), 404
-            if evento["data_evento"]:
-                evento["data_evento"] = str(evento["data_evento"])
-            if evento["horario"]:
-                evento["horario"] = str(evento["horario"])
+            if evento["data_evento"]: evento["data_evento"] = str(evento["data_evento"])
+            if evento["horario"]:     evento["horario"]     = str(evento["horario"])
         return jsonify(evento), 200
     finally:
         db.close()
 
 @app.route("/api/eventos", methods=["POST"])
+@token_obrigatorio  # ← Só empresas logadas podem criar eventos
 def criar_evento():
+    if request.usuario_atual.get("tipo") != "empresa":
+        return jsonify({"erro": "Apenas empresas podem publicar eventos"}), 403
+
     data = request.json
-    campos = ["empresaId", "categoriaId", "titulo", "dataEvento", "local"]
-    for c in campos:
+    for c in ["categoriaId", "titulo", "dataEvento", "local"]:
         if not data.get(c):
             return jsonify({"erro": f"Campo '{c}' é obrigatório"}), 400
 
@@ -123,7 +169,7 @@ def criar_evento():
                  horario, local, contato_whatsapp, foto_url, expira_em)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
-                data["empresaId"],
+                request.usuario_atual["id"],
                 data["categoriaId"],
                 data["titulo"],
                 data.get("descricao"),
@@ -141,6 +187,7 @@ def criar_evento():
         db.close()
 
 @app.route("/api/eventos/<int:id>", methods=["DELETE"])
+@token_obrigatorio
 def deletar_evento(id):
     db = get_db()
     try:
@@ -173,9 +220,8 @@ def listar_empresas():
             """)
             empresas = cur.fetchall()
             for e in empresas:
-                e["init"] = e["name"][0].upper() if e["name"] else "E"
-                if e["criado_em"]:
-                    e["criado_em"] = str(e["criado_em"])
+                e["init"] = (e["name"] or "E")[0].upper()
+                if e["criado_em"]: e["criado_em"] = str(e["criado_em"])
         return jsonify(empresas), 200
     finally:
         db.close()
@@ -203,8 +249,7 @@ def obter_empresa(id):
 @app.route("/api/empresas/cadastro", methods=["POST"])
 def cadastrar_empresa():
     data = request.json
-    campos = ["nome", "cnpj", "email", "senha", "cidadeId", "segmentoId"]
-    for c in campos:
+    for c in ["nome", "cnpj", "email", "senha", "cidadeId", "segmentoId"]:
         if not data.get(c):
             return jsonify({"erro": f"Campo '{c}' é obrigatório"}), 400
 
@@ -215,7 +260,6 @@ def cadastrar_empresa():
     db = get_db()
     try:
         with db.cursor() as cur:
-            # Verifica duplicidade
             cur.execute(
                 "SELECT id FROM empresa WHERE email = %s OR cnpj = %s",
                 (data["email"], cnpj_digits)
@@ -227,17 +271,20 @@ def cadastrar_empresa():
                 INSERT INTO empresa (cidade_id, segmento_id, nome, cnpj, email, senha_hash, telefone)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (
-                data["cidadeId"],
-                data["segmentoId"],
-                data["nome"],
-                cnpj_digits,
-                data["email"],
-                hash_senha(data["senha"]),
+                data["cidadeId"], data["segmentoId"], data["nome"],
+                cnpj_digits, data["email"], hash_senha(data["senha"]),
                 data.get("telefone")
             ))
             db.commit()
             novo_id = cur.lastrowid
-        return jsonify({"id": novo_id, "mensagem": "Empresa cadastrada com sucesso!"}), 201
+
+        # Gera token JWT automaticamente após cadastro
+        token = gerar_token(novo_id, "empresa")
+        return jsonify({
+            "id": novo_id,
+            "token": token,
+            "mensagem": "Empresa cadastrada com sucesso!"
+        }), 201
     finally:
         db.close()
 
@@ -260,9 +307,17 @@ def login_empresa():
             empresa = cur.fetchone()
             if not empresa:
                 return jsonify({"erro": "Email ou senha incorretos"}), 401
+
             empresa["type"] = "empresa"
             empresa["init"] = empresa["name"][0].upper()
-        return jsonify({"mensagem": "Login realizado!", "usuario": empresa}), 200
+
+        # Gera token JWT
+        token = gerar_token(empresa["id"], "empresa")
+        return jsonify({
+            "mensagem": "Login realizado!",
+            "token": token,
+            "usuario": empresa
+        }), 200
     finally:
         db.close()
 
@@ -289,7 +344,14 @@ def cadastrar_usuario():
             """, (data["nome"], data["email"], hash_senha(data["senha"])))
             db.commit()
             novo_id = cur.lastrowid
-        return jsonify({"id": novo_id, "mensagem": "Conta criada com sucesso!"}), 201
+
+        # Gera token JWT automaticamente após cadastro
+        token = gerar_token(novo_id, "user")
+        return jsonify({
+            "id": novo_id,
+            "token": token,
+            "mensagem": "Conta criada com sucesso!"
+        }), 201
     finally:
         db.close()
 
@@ -310,14 +372,22 @@ def login_usuario():
             usuario = cur.fetchone()
             if not usuario:
                 return jsonify({"erro": "Email ou senha incorretos"}), 401
+
             usuario["type"] = "user"
             usuario["init"] = usuario["name"][0].upper()
-        return jsonify({"mensagem": "Login realizado!", "usuario": usuario}), 200
+
+        # Gera token JWT
+        token = gerar_token(usuario["id"], "user")
+        return jsonify({
+            "mensagem": "Login realizado!",
+            "token": token,
+            "usuario": usuario
+        }), 200
     finally:
         db.close()
 
 # =============================================
-#  AUXILIARES (Categorias, Cidades, Segmentos)
+#  AUXILIARES
 # =============================================
 
 @app.route("/api/categorias", methods=["GET"])
@@ -356,7 +426,7 @@ def listar_segmentos():
 
 @app.route("/", methods=["GET"])
 def index():
-    return jsonify({"status": "ConectaMonga API rodando!"}), 200
+    return jsonify({"status": "ConectaMonga API rodando!", "versao": "2.0 (JWT)"}), 200
 
 # =============================================
 #  INICIALIZAÇÃO
